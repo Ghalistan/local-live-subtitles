@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "local-live-subtitles",
+      "name": "live-subtitles-extension",
       "devDependencies": {
         "@types/chrome": "latest",
         "@wxt-dev/module-svelte": "latest",
