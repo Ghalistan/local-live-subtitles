@@ -1,0 +1,9 @@
+node_modules
+.output
+.wxt
+public/ort
+target
+dist
+.DS_Store
+.playwright-mcp
+.agents/plugins/playwright/mcp_config.json

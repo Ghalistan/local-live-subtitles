@@ -1,0 +1,165 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extension:
+    name: Chrome Extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun --cwd extension install --frozen-lockfile
+
+      - name: Run extension tests
+        run: bun --cwd extension test
+
+      - name: Typecheck extension
+        run: bun --cwd extension compile
+
+      - name: Package Chrome extension zip
+        run: bun --cwd extension zip
+
+      - name: Stage extension archive
+        shell: bash
+        run: |
+          shopt -s nullglob
+          VERSION=$(node -p "require('./extension/package.json').version")
+          mkdir -p dist
+          ZIPS=(extension/.output/*-chrome.zip)
+          if [ ${#ZIPS[@]} -eq 0 ]; then
+            echo "No Chrome extension zip found in extension/.output/"
+            exit 1
+          fi
+          cp "${ZIPS[0]}" "dist/local-live-subtitles-extension-v${VERSION}-chrome.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chrome-extension
+          path: dist/*.zip
+          if-no-files-found: error
+
+  desktop-server:
+    name: Desktop Server (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-15
+            target: macos-arm64
+          - os: windows-latest
+            target: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake pkg-config libclang-dev libvulkan-dev glslc \
+            libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgtk-3-dev libssl-dev libdbus-1-dev
+
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.target == 'windows-x86_64'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: latest
+          cache: true
+
+      - name: Configure LIBCLANG_PATH (Windows)
+        if: matrix.target == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files\LLVM\bin") {
+            "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native -> target
+
+      - name: Run native tests
+        run: cargo test --manifest-path native/Cargo.toml
+
+      - name: Build release binary (Linux)
+        if: matrix.target == 'linux-x86_64'
+        env:
+          RUSTFLAGS: '-C link-arg=-Wl,-rpath,$ORIGIN'
+        run: cargo build --manifest-path native/Cargo.toml --release
+
+      - name: Build release binary (macOS)
+        if: matrix.target == 'macos-arm64'
+        env:
+          RUSTFLAGS: '-C link-arg=-Wl,-rpath,@executable_path'
+        run: cargo build --manifest-path native/Cargo.toml --release
+
+      - name: Build release binary (Windows)
+        if: matrix.target == 'windows-x86_64'
+        run: cargo build --manifest-path native/Cargo.toml --release
+
+      - name: Package desktop server (Unix)
+        if: matrix.target != 'windows-x86_64'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          VERSION=$(node -p "require('./extension/package.json').version")
+          STAGE="dist/stage"
+          mkdir -p "$STAGE"
+          cp native/target/release/live-subtitles-native "$STAGE/"
+          for lib in native/target/release/libonnxruntime*; do
+            cp -P "$lib" "$STAGE/"
+          done
+          tar -C "$STAGE" -czf "dist/local-live-subtitles-server-v${VERSION}-${{ matrix.target }}.tar.gz" .
+          rm -rf "$STAGE"
+
+      - name: Package desktop server (Windows)
+        if: matrix.target == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          $VERSION = node -p "require('./extension/package.json').version"
+          $stage = "dist/stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "native/target/release/live-subtitles-native.exe" "$stage/"
+          Get-ChildItem "native/target/release/onnxruntime*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "$stage/"
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/local-live-subtitles-server-v${VERSION}-windows-x86_64.zip" -Force
+          Remove-Item -Recurse -Force $stage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-server-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [extension, desktop-server]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true

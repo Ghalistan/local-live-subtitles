@@ -1,0 +1,14 @@
+{
+  "name": "auto-translation",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "ext:dev": "bun --cwd extension dev",
+    "ext:build": "bun --cwd extension build",
+    "ext:compile": "bun --cwd extension compile",
+    "ext:test": "bun --cwd extension test",
+    "native:run": "cargo run --release --manifest-path native/Cargo.toml",
+    "native:build": "cargo build --release --manifest-path native/Cargo.toml",
+    "native:test": "cargo test --manifest-path native/Cargo.toml"
+  }
+}
