@@ -85,6 +85,7 @@ jobs:
             cmake pkg-config libclang-dev libvulkan-dev glslc \
             libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev libgtk-3-dev libssl-dev libdbus-1-dev
+          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
 
       - name: Resolve latest Vulkan SDK version (Windows)
         if: matrix.target == 'windows-x86_64'

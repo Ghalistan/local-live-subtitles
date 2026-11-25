@@ -839,6 +839,38 @@ async fn run_server(initial_addr: String, ui_state: SharedState) {
     }
 }
 
+fn run_desktop_loop<R, F>(
+    ui_state: &SharedState,
+    runtime: &mut Option<R>,
+    is_linux: bool,
+    is_macos: bool,
+    mut open_window: F,
+) where
+    F: FnMut(SharedState, &mut dyn FnMut()) -> Result<(), String>,
+{
+    loop {
+        if ui_state.should_show_window() {
+            let mut on_exit = || {
+                // AppKit can terminate the process without returning from run_window.
+                if is_macos {
+                    drop(runtime.take());
+                }
+            };
+            if let Err(err) = open_window(ui_state.clone(), &mut on_exit) {
+                eprintln!("[ui] Failed to open desktop window: {err}");
+                break;
+            }
+            ui_state.mark_window_closed();
+            if !is_linux {
+                break;
+            }
+        }
+        if !ui_state.wait_until_show_or_quit() {
+            break;
+        }
+    }
+}
+
 fn main() {
     let addr = std::env::var("LIVE_SUBTITLES_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
     let headless = std::env::args().any(|a| a == "--headless");
@@ -856,30 +888,36 @@ fn main() {
     rt.spawn(run_server(addr, ui_state.clone()));
     let mut runtime = Some(rt);
 
-    loop {
-        if ui_state.should_show_window() {
-            if let Err(err) = ui::run_window(ui_state.clone(), || {
-                // AppKit can terminate the process without returning from run_window.
-                if cfg!(target_os = "macos") {
-                    drop(runtime.take());
-                }
-            }) {
-                eprintln!("[ui] Failed to open desktop window: {err}");
-                break;
-            }
-            ui_state.mark_window_closed();
-            #[cfg(not(target_os = "linux"))]
-            break;
-        }
-        if !ui_state.wait_until_show_or_quit() {
-            break;
-        }
-    }
+    run_desktop_loop(
+        &ui_state,
+        &mut runtime,
+        cfg!(target_os = "linux"),
+        cfg!(target_os = "macos"),
+        |state, on_exit| ui::run_window(state, on_exit).map_err(|e| e.to_string()),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn open_state_for_test() -> SharedState {
+        let state = SharedState::new("127.0.0.1:8765".to_string());
+        if !state.should_show_window() {
+            state.toggle_window();
+        }
+        assert!(state.should_show_window());
+        state
+    }
 
     #[test]
     fn serializes_progress_speed_and_deserializes_cancel_download() {
@@ -896,5 +934,80 @@ mod tests {
 
         let parsed: ClientMessage = serde_json::from_str(r#"{"type":"cancelDownload"}"#).unwrap();
         assert!(matches!(parsed, ClientMessage::CancelDownload));
+    }
+
+    #[test]
+    fn macos_drops_runtime_inside_window_on_exit_and_stops_loop() {
+        let state = open_state_for_test();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut runtime = Some(DropFlag(Arc::clone(&dropped)));
+        let mut opens = 0;
+
+        run_desktop_loop(&state, &mut runtime, false, true, |_s, on_exit| {
+            opens += 1;
+            assert!(!dropped.load(Ordering::SeqCst));
+            on_exit();
+            assert!(dropped.load(Ordering::SeqCst));
+            Ok(())
+        });
+
+        assert_eq!(opens, 1);
+        assert!(runtime.is_none());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn linux_keeps_runtime_across_tray_hide_and_reopen_until_quit() {
+        let state = open_state_for_test();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut runtime = Some(DropFlag(Arc::clone(&dropped)));
+        let mut opens = 0;
+        let mut reopener = None;
+
+        run_desktop_loop(&state, &mut runtime, true, false, |s, on_exit| {
+            opens += 1;
+            on_exit();
+            assert!(!dropped.load(Ordering::SeqCst));
+
+            if opens == 1 {
+                let s_clone = s.clone();
+                reopener = Some(std::thread::spawn(move || {
+                    while s_clone.snapshot().window_open {
+                        std::thread::yield_now();
+                    }
+                    s_clone.toggle_window();
+                }));
+            } else {
+                s.request_quit();
+            }
+            Ok(())
+        });
+
+        if let Some(handle) = reopener {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(opens, 2);
+        assert!(runtime.is_some());
+        assert!(!dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn windows_exits_loop_on_window_close_without_early_on_exit_drop() {
+        let state = open_state_for_test();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut runtime = Some(DropFlag(Arc::clone(&dropped)));
+        let mut opens = 0;
+
+        run_desktop_loop(&state, &mut runtime, false, false, |_s, on_exit| {
+            opens += 1;
+            on_exit();
+            assert!(!dropped.load(Ordering::SeqCst));
+            Ok(())
+        });
+
+        assert_eq!(opens, 1);
+        assert!(runtime.is_some());
+        assert!(!dropped.load(Ordering::SeqCst));
     }
 }

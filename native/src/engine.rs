@@ -218,3 +218,17 @@ pub fn transcribe(
     let ms = t0.elapsed().as_millis();
     Ok((cleaned, raw, ms))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whisper_backend_links_and_rejects_missing_model() {
+        let mut params = WhisperContextParameters::default();
+        params.use_gpu(true);
+        params.flash_attn(true);
+        let res = WhisperContext::new_with_params("__nonexistent_whisper_model__.bin", params);
+        assert!(res.is_err());
+    }
+}
