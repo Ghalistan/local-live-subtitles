@@ -1,6 +1,7 @@
 {
   "name": "auto-translation",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "ext:dev": "bun --cwd extension dev",
