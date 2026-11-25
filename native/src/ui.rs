@@ -118,21 +118,23 @@ fn render_furigana_line(
     });
 }
 
-struct LiveSubtitlesApp {
+struct LiveSubtitlesApp<F> {
     state: SharedState,
+    on_exit: F,
     show_settings: bool,
     port_input: String,
     local_port_error: Option<String>,
 }
 
-impl LiveSubtitlesApp {
-    fn new(cc: &eframe::CreationContext<'_>, state: SharedState) -> Self {
+impl<F> LiveSubtitlesApp<F> {
+    fn new(cc: &eframe::CreationContext<'_>, state: SharedState, on_exit: F) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         install_japanese_font(&cc.egui_ctx);
         state.attach_egui_ctx(cc.egui_ctx.clone());
         let port_input = extract_port(&state.snapshot().server_addr).to_string();
         Self {
             state,
+            on_exit,
             show_settings: false,
             port_input,
             local_port_error: None,
@@ -153,7 +155,11 @@ impl LiveSubtitlesApp {
     }
 }
 
-impl eframe::App for LiveSubtitlesApp {
+impl<F: FnMut()> eframe::App for LiveSubtitlesApp<F> {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        (self.on_exit)();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.state.attach_egui_ctx(ctx.clone());
@@ -383,7 +389,7 @@ impl eframe::App for LiveSubtitlesApp {
     }
 }
 
-pub fn run_window(state: SharedState) -> eframe::Result<()> {
+pub fn run_window(state: SharedState, on_exit: impl FnMut()) -> eframe::Result<()> {
     let title = if cfg!(target_os = "macos") {
         "Live Subtitles — Metal"
     } else {
@@ -402,6 +408,6 @@ pub fn run_window(state: SharedState) -> eframe::Result<()> {
     eframe::run_native(
         "Live Subtitles",
         options,
-        Box::new(move |cc| Ok(Box::new(LiveSubtitlesApp::new(cc, state)))),
+        Box::new(move |cc| Ok(Box::new(LiveSubtitlesApp::new(cc, state, on_exit)))),
     )
 }

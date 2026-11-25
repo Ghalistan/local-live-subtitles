@@ -843,28 +843,27 @@ fn main() {
     let addr = std::env::var("LIVE_SUBTITLES_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
     let headless = std::env::args().any(|a| a == "--headless");
     let ui_state = SharedState::new(addr.clone());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to start Tokio runtime");
 
     if headless {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to start Tokio runtime");
         rt.block_on(run_server(addr, ui_state));
         return;
     }
 
-    let bg_state = ui_state.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to start Tokio runtime");
-        rt.block_on(run_server(addr, bg_state));
-    });
+    rt.spawn(run_server(addr, ui_state.clone()));
+    let mut runtime = Some(rt);
 
     loop {
         if ui_state.should_show_window() {
-            if let Err(err) = ui::run_window(ui_state.clone()) {
+            if let Err(err) = ui::run_window(ui_state.clone(), || {
+                // AppKit can terminate the process without returning from run_window.
+                if cfg!(target_os = "macos") {
+                    drop(runtime.take());
+                }
+            }) {
                 eprintln!("[ui] Failed to open desktop window: {err}");
                 break;
             }
