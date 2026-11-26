@@ -24,6 +24,24 @@ pub const DIARIZER_FILENAME: &str = "nemotron3-diar-v3-int8.onnx";
 pub const DIARIZER_URL: &str =
     "https://huggingface.co/jparedesDS/nemotron-3-diarization-onnx/resolve/main/nemotron3_diar_v3_int8.onnx";
 
+pub const HY_MT3_REPO: &str = "tencent/Hy-MT3-1.8B-GGUF";
+pub const HY_MT3_FILENAME: &str = "hy-mt3-1.8b.gguf";
+
+pub async fn hy_mt3_model_bytes() -> Option<u64> {
+    let target = cache_dir().join(HY_MT3_FILENAME);
+    let meta = tokio::fs::metadata(&target).await.ok()?;
+    (meta.is_file() && meta.len() > 0).then_some(meta.len())
+}
+
+pub async fn delete_hy_mt3_model() -> Result<(), String> {
+    let path = cache_dir().join(HY_MT3_FILENAME);
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to delete {}: {e}", path.display())),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LocalModelFile {
     pub filename: String,
@@ -234,7 +252,7 @@ fn unique_part_path(target: &std::path::Path) -> PathBuf {
     target.with_file_name(format!("{name}.part.{}-{seq}", std::process::id()))
 }
 
-async fn download_url_to_path<F>(
+pub(crate) async fn download_url_to_path<F>(
     target: &std::path::Path,
     download_url: &str,
     display_name: &str,

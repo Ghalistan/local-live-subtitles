@@ -1,10 +1,31 @@
+import { fetchElevenLabsModelsViaServer, sanitizeElevenLabsModels } from '../lib/elevenlabs';
 import {
+  DEFAULT_GOOGLE_TARGET_LANGUAGE,
+  DEFAULT_TRANSLATOR_TARGET_LANGUAGE,
+  googleModelSupportsDirectS2tt,
+  pickDefaultGoogleModel,
+  sanitizeGoogleModels,
+  sanitizeGoogleTargetLanguage,
+  sanitizeTranslatorTargetLanguage,
+} from '../lib/gemini';
+import {
+  CLOUD_PROVIDERS,
+  DEFAULT_DIARIZATION_MODEL,
+  DEFAULT_ENDPOINT_MECHANISM,
   DEFAULT_SUBTITLE_STYLE,
+  DEFAULT_TRANSLATOR_ENGINE,
+  DEFAULT_VAD_MODEL,
   LINE_EXPIRE_MS,
   parsePortFromServerUrl,
   portToServerUrl,
   pushSubtitleLine,
+  sanitizeDiarizationModel,
+  sanitizeEndpointMechanism,
+  sanitizeProvider,
   sanitizeSubtitleStyle,
+  sanitizeTranslatorEngine,
+  sanitizeVadModel,
+  type BackgroundToOffscreenMessage,
   type ExtensionState,
   type OffscreenToBackgroundMessage,
   type PopupToBackgroundMessage,
@@ -18,8 +39,9 @@ import {
   DEFAULT_SERVER_URL,
   DEFAULT_TARGET_LANGUAGE,
   buildVisibleModels,
+  findModelEntry,
+  loadModelVariants,
   migrateLegacyModelSelection,
-  pickVariantForModel,
   resolveModelSource,
   sanitizeCustomModels,
   sanitizeHiddenModelIds,
@@ -29,11 +51,25 @@ import {
 export default defineBackground(() => {
   const state: ExtensionState = {
     status: 'idle',
+    provider: 'local',
     tabId: null,
     modelId: DEFAULT_MODEL_ID,
     quantId: DEFAULT_QUANT_ID,
     hiddenModelIds: [],
     customModels: [],
+    geminiApiKey: '',
+    speechApiKeys: { soniox: '', elevenlabs: '' },
+    googleModelId: '',
+    googleModels: [],
+    elevenLabsModelId: '',
+    elevenLabsModels: [],
+    googleTargetLanguage: DEFAULT_GOOGLE_TARGET_LANGUAGE,
+    translatorEngine: DEFAULT_TRANSLATOR_ENGINE,
+    translatorTargetLanguage: DEFAULT_TRANSLATOR_TARGET_LANGUAGE,
+    enableVadEndpointing: true,
+    vadModel: DEFAULT_VAD_MODEL,
+    endpointMechanism: DEFAULT_ENDPOINT_MECHANISM,
+    diarizationModel: DEFAULT_DIARIZATION_MODEL,
     language: DEFAULT_LANGUAGE,
     targetLanguage: DEFAULT_TARGET_LANGUAGE,
     showFurigana: true,
@@ -58,21 +94,39 @@ export default defineBackground(() => {
   let downloadWs: WebSocket | null = null;
   let cancelActiveDownload: (() => void) | null = null;
 
-  const settingsReady = chrome.storage.local
-    .get({
+  const trustedStorageReady = chrome.storage.local.setAccessLevel({
+    accessLevel: 'TRUSTED_CONTEXTS',
+  });
+  const settingsReady = trustedStorageReady
+    .then(() => chrome.storage.local.get({
+      provider: 'local',
       modelId: DEFAULT_MODEL_ID,
       quantId: DEFAULT_QUANT_ID,
       hiddenModelIds: [] as string[],
       customModels: [] as unknown[],
       customRepo: '',
       customFilename: '',
+      geminiApiKey: '',
+      sonioxApiKey: '',
+      elevenlabsApiKey: '',
+      googleModelId: '',
+      googleModels: [] as unknown[],
+      elevenLabsModelId: '',
+      elevenLabsModels: [] as unknown[],
+      googleTargetLanguage: DEFAULT_GOOGLE_TARGET_LANGUAGE,
+      translatorEngine: DEFAULT_TRANSLATOR_ENGINE,
+      translatorTargetLanguage: DEFAULT_TRANSLATOR_TARGET_LANGUAGE,
+      enableVadEndpointing: true,
+      vadModel: DEFAULT_VAD_MODEL,
+      endpointMechanism: DEFAULT_ENDPOINT_MECHANISM,
+      diarizationModel: '',
       language: DEFAULT_LANGUAGE,
       targetLanguage: DEFAULT_TARGET_LANGUAGE,
       showFurigana: true,
       enableDiarization: false,
       subtitleStyle: DEFAULT_SUBTITLE_STYLE,
       serverUrl: DEFAULT_SERVER_URL,
-    })
+    }))
     .then((saved) => {
       const sanitizedCustom = sanitizeCustomModels(saved.customModels);
       const migrated = migrateLegacyModelSelection(
@@ -85,15 +139,43 @@ export default defineBackground(() => {
       const hidden = sanitizeHiddenModelIds(saved.hiddenModelIds, migrated.customModels);
       const visible = buildVisibleModels(hidden, migrated.customModels);
       const active = visible.find((m) => m.id === migrated.modelId) ?? visible[0]!;
+      const googleModels = sanitizeGoogleModels(saved.googleModels);
+      const activeGoogle = pickDefaultGoogleModel(
+        googleModels,
+        typeof saved.googleModelId === 'string' ? saved.googleModelId : undefined,
+      );
 
+      state.provider = sanitizeProvider(saved.provider);
       state.customModels = migrated.customModels;
       state.hiddenModelIds = hidden;
       state.modelId = active.id;
-      state.quantId = pickVariantForModel(active, migrated.quantId).id;
+      state.quantId = active.id === migrated.modelId ? migrated.quantId : active.defaultVariantId;
+      state.geminiApiKey = typeof saved.geminiApiKey === 'string' ? saved.geminiApiKey.trim() : '';
+      state.speechApiKeys = {
+        soniox: typeof saved.sonioxApiKey === 'string' ? saved.sonioxApiKey.trim() : '',
+        elevenlabs: typeof saved.elevenlabsApiKey === 'string' ? saved.elevenlabsApiKey.trim() : '',
+      };
+      state.googleModels = googleModels;
+      state.googleModelId = activeGoogle?.id ?? '';
+      state.elevenLabsModels = sanitizeElevenLabsModels(saved.elevenLabsModels);
+      state.elevenLabsModelId = state.elevenLabsModels.find((model) => model.id === saved.elevenLabsModelId)?.id
+        ?? state.elevenLabsModels[0]?.id ?? '';
+      state.googleTargetLanguage = sanitizeGoogleTargetLanguage(saved.googleTargetLanguage);
+      state.translatorEngine = sanitizeTranslatorEngine(saved.translatorEngine);
+      state.translatorTargetLanguage = sanitizeTranslatorTargetLanguage(
+        saved.translatorTargetLanguage,
+      );
+      state.enableVadEndpointing = saved.enableVadEndpointing !== false;
+      state.vadModel = sanitizeVadModel(saved.vadModel);
+      state.endpointMechanism = sanitizeEndpointMechanism(saved.endpointMechanism);
+      state.diarizationModel = sanitizeDiarizationModel(
+        saved.diarizationModel,
+        Boolean(saved.enableDiarization),
+      );
       state.language = String(saved.language || DEFAULT_LANGUAGE);
       state.targetLanguage = sanitizeTargetLanguage(saved.targetLanguage);
       state.showFurigana = saved.showFurigana !== false;
-      state.enableDiarization = Boolean(saved.enableDiarization);
+      state.enableDiarization = state.diarizationModel !== 'disabled';
       state.subtitleStyle = sanitizeSubtitleStyle(
         saved.subtitleStyle as Partial<SubtitleStyle> | undefined,
       );
@@ -102,6 +184,8 @@ export default defineBackground(() => {
       );
     })
     .catch(() => {});
+  let credentialWrites = settingsReady;
+  let elevenLabsWrites = settingsReady;
 
   function broadcastState(): void {
     chrome.runtime.sendMessage({ type: 'STATE_CHANGED', state }).catch(() => {});
@@ -143,7 +227,7 @@ export default defineBackground(() => {
     await chrome.offscreen.createDocument({
       url: chrome.runtime.getURL('/offscreen.html'),
       reasons: [chrome.offscreen.Reason.USER_MEDIA],
-      justification: 'Capture tab audio and stream 16kHz PCM to the local Vulkan ASR server',
+      justification: 'Capture tab audio and stream 16 kHz PCM to the native subtitle server',
     });
   }
 
@@ -181,24 +265,216 @@ export default defineBackground(() => {
     msg: Extract<PopupToBackgroundMessage, { type: 'START_CAPTURE' }>,
   ): Promise<void> {
     await settingsReady;
+    const provider = sanitizeProvider(msg.provider ?? state.provider);
+    state.provider = provider;
+
+    if (provider !== 'local') {
+      const apiKey = provider === 'google' ? state.geminiApiKey : state.speechApiKeys[provider];
+      const label = CLOUD_PROVIDERS.find(({ id }) => id === provider)?.label ?? provider;
+      if (!apiKey) {
+        state.status = 'error';
+        state.error = `Set your ${label} API key in Settings before starting.`;
+        broadcastState();
+        return;
+      }
+      const googleModel = provider === 'google'
+        ? msg.googleModel ?? pickDefaultGoogleModel(state.googleModels, state.googleModelId)
+        : undefined;
+      if (provider === 'google' && !googleModel) {
+        state.status = 'error';
+        state.error = 'Load and select a Google model before starting.';
+        broadcastState();
+        return;
+      }
+      let elevenLabsModelId: string | undefined;
+      if (provider === 'elevenlabs') {
+        await elevenLabsWrites;
+        elevenLabsModelId = msg.elevenLabsModelId || state.elevenLabsModelId || undefined;
+        if (elevenLabsModelId && !state.elevenLabsModels.some((model) => model.id === elevenLabsModelId)) {
+          state.status = 'error';
+          state.error = 'Select an available ElevenLabs model before starting.';
+          broadcastState();
+          return;
+        }
+      }
+      const serverUrl = portToServerUrl(
+        parsePortFromServerUrl(msg.serverUrl || state.serverUrl || DEFAULT_SERVER_URL),
+      );
+      const diarizationModel = sanitizeDiarizationModel(
+        msg.diarizationModel ?? state.diarizationModel,
+        msg.enableDiarization ?? state.enableDiarization,
+      );
+      const enableDiarization = diarizationModel !== 'disabled';
+      const enableVadEndpointing = msg.enableVadEndpointing ?? state.enableVadEndpointing;
+      const vadModel = sanitizeVadModel(msg.vadModel ?? state.vadModel);
+      const endpointMechanism = sanitizeEndpointMechanism(
+        msg.endpointMechanism ?? state.endpointMechanism,
+      );
+      const supportsDirect = googleModel ? googleModelSupportsDirectS2tt(googleModel.kind) : false;
+      const googleTargetLanguage = supportsDirect
+        ? sanitizeGoogleTargetLanguage(msg.googleTargetLanguage ?? state.googleTargetLanguage)
+        : 'same';
+      const chosenTranslatorEngine = sanitizeTranslatorEngine(
+        msg.translatorEngine ?? state.translatorEngine,
+      );
+      const effectiveTranslatorEngine = supportsDirect ? 'disabled' : chosenTranslatorEngine;
+      const translatorTargetLanguage = sanitizeTranslatorTargetLanguage(
+        msg.translatorTargetLanguage ?? state.translatorTargetLanguage,
+      );
+
+      state.language = msg.language;
+      if (supportsDirect) {
+        state.googleTargetLanguage = googleTargetLanguage;
+      } else {
+        state.translatorEngine = chosenTranslatorEngine;
+      }
+      state.translatorTargetLanguage = translatorTargetLanguage;
+      if (googleModel) state.googleModelId = googleModel.id;
+      state.enableVadEndpointing = enableVadEndpointing;
+      state.vadModel = vadModel;
+      state.endpointMechanism = endpointMechanism;
+      state.diarizationModel = diarizationModel;
+      state.enableDiarization = enableDiarization;
+      state.serverUrl = serverUrl;
+      await chrome.storage.local
+        .set({
+          provider,
+          googleModelId: state.googleModelId,
+          language: msg.language,
+          googleTargetLanguage: state.googleTargetLanguage,
+          translatorEngine: state.translatorEngine,
+          translatorTargetLanguage,
+          enableVadEndpointing,
+          vadModel,
+          endpointMechanism,
+          diarizationModel,
+          enableDiarization,
+          serverUrl,
+        })
+        .catch(() => {});
+
+      if (state.tabId !== null && state.tabId !== msg.tabId) {
+        await sendSubtitleToTab(state.tabId, [], false);
+      }
+
+      state.status = 'loading';
+      state.tabId = msg.tabId;
+      state.device = provider;
+      state.activity = '';
+      state.error = null;
+      state.lastText = '';
+      subtitleLines = [];
+      state.progress = null;
+      state.progressLabel = `Connecting to ${label}...`;
+      state.progressSpeedBps = null;
+      broadcastState();
+
+      try {
+        await sendSubtitleToTab(msg.tabId, [], false);
+        await ensureOffscreen();
+        const streamId = await getTabStreamId(msg.tabId);
+        const commonPayload = {
+          type: 'OFFSCREEN_START' as const,
+          streamId,
+          apiKey,
+          language: msg.language,
+          translatorEngine: effectiveTranslatorEngine,
+          translatorTargetLanguage,
+          diarizationModel,
+          enableDiarization,
+          serverUrl,
+        };
+        if (provider !== 'google') {
+          await chrome.runtime.sendMessage({
+            ...commonPayload, provider, elevenLabsModelId,
+          } satisfies BackgroundToOffscreenMessage);
+        } else if (googleModel) {
+          await chrome.runtime.sendMessage({
+            ...commonPayload,
+            provider,
+            model: googleModel,
+            targetLanguage: googleTargetLanguage,
+            enableVadEndpointing,
+            vadModel,
+            endpointMechanism,
+          } satisfies BackgroundToOffscreenMessage);
+        }
+      } catch (err) {
+        state.status = 'error';
+        state.error = err instanceof Error ? err.message : String(err);
+        state.progress = null;
+        state.progressLabel = '';
+        state.progressSpeedBps = null;
+        broadcastState();
+      }
+      return;
+    }
+
     const serverUrl = portToServerUrl(
       parsePortFromServerUrl(msg.serverUrl || state.serverUrl || DEFAULT_SERVER_URL),
     );
-    const enableDiarization = msg.enableDiarization ?? state.enableDiarization;
+    const diarizationModel = sanitizeDiarizationModel(
+      msg.diarizationModel ?? state.diarizationModel,
+      msg.enableDiarization ?? state.enableDiarization,
+    );
+    const enableDiarization = diarizationModel !== 'disabled';
+    const enableVadEndpointing = msg.enableVadEndpointing ?? state.enableVadEndpointing;
+    const vadModel = sanitizeVadModel(msg.vadModel ?? state.vadModel);
+    const endpointMechanism = sanitizeEndpointMechanism(
+      msg.endpointMechanism ?? state.endpointMechanism,
+    );
     const targetLanguage = sanitizeTargetLanguage(msg.targetLanguage ?? state.targetLanguage);
+    let source = msg.source;
+    if (!source) {
+      const model = findModelEntry(msg.modelId, state.customModels);
+      try {
+        const variants = model.isCustom ? model.variants : await loadModelVariants(model);
+        source = resolveModelSource({ ...model, variants }, msg.quantId);
+        if (!source) throw new Error(`No quantizations available for ${model.label}.`);
+      } catch (err) {
+        state.status = 'error';
+        state.error = err instanceof Error ? err.message : String(err);
+        broadcastState();
+        return;
+      }
+    }
+    const chosenTranslatorEngine = sanitizeTranslatorEngine(
+      msg.translatorEngine ?? state.translatorEngine,
+    );
+    const effectiveTranslatorEngine = source.supportsDirectS2tt
+      ? 'disabled'
+      : chosenTranslatorEngine;
+    const translatorTargetLanguage = sanitizeTranslatorTargetLanguage(
+      msg.translatorTargetLanguage ?? state.translatorTargetLanguage,
+    );
 
     state.modelId = msg.modelId;
     state.quantId = msg.quantId;
     state.language = msg.language;
     state.targetLanguage = targetLanguage;
+    if (!source.supportsDirectS2tt) {
+      state.translatorEngine = chosenTranslatorEngine;
+    }
+    state.translatorTargetLanguage = translatorTargetLanguage;
+    state.enableVadEndpointing = enableVadEndpointing;
+    state.vadModel = vadModel;
+    state.endpointMechanism = endpointMechanism;
+    state.diarizationModel = diarizationModel;
     state.enableDiarization = enableDiarization;
     state.serverUrl = serverUrl;
     await chrome.storage.local
       .set({
+        provider: 'local',
         modelId: msg.modelId,
         quantId: msg.quantId,
         language: msg.language,
         targetLanguage,
+        translatorEngine: state.translatorEngine,
+        translatorTargetLanguage,
+        enableVadEndpointing,
+        vadModel,
+        endpointMechanism,
+        diarizationModel,
         enableDiarization,
         serverUrl,
       })
@@ -223,8 +499,6 @@ export default defineBackground(() => {
       await sendSubtitleToTab(msg.tabId, [], false);
       await ensureOffscreen();
       const streamId = await getTabStreamId(msg.tabId);
-      const source =
-        msg.source ?? resolveModelSource(msg.modelId, msg.quantId, state.customModels);
       const translate =
         Boolean(source.supportsDirectS2tt) &&
         targetLanguage === 'en' &&
@@ -232,10 +506,17 @@ export default defineBackground(() => {
 
       await chrome.runtime.sendMessage({
         type: 'OFFSCREEN_START',
+        provider: 'local',
         streamId,
         source,
         language: msg.language,
         translate,
+        translatorEngine: effectiveTranslatorEngine,
+        translatorTargetLanguage,
+        enableVadEndpointing,
+        vadModel,
+        endpointMechanism,
+        diarizationModel,
         enableDiarization,
         serverUrl,
       });
@@ -249,24 +530,20 @@ export default defineBackground(() => {
     }
   }
 
-  function startModelDownload(
-    msg: Extract<PopupToBackgroundMessage, { type: 'DOWNLOAD_MODEL' }>,
+  function startServerDownload(
+    filename: string,
+    displayLabel: string,
+    payload: Record<string, unknown>,
+    serverUrlInput?: string,
   ): void {
     if (state.downloadingFilename !== null || downloadWs !== null) return;
 
-    const filename = msg.source.filename?.trim();
-    if (!filename) {
-      state.error = 'Select a model before downloading.';
-      broadcastState();
-      return;
-    }
-
     const serverUrl = portToServerUrl(
-      parsePortFromServerUrl(msg.serverUrl || state.serverUrl || DEFAULT_SERVER_URL),
+      parsePortFromServerUrl(serverUrlInput || state.serverUrl || DEFAULT_SERVER_URL),
     );
     state.downloadingFilename = filename;
     state.downloadProgress = 0;
-    state.downloadLabel = `Connecting to download ${filename}...`;
+    state.downloadLabel = `Connecting to download ${displayLabel}...`;
     state.downloadSpeedBps = null;
     state.error = null;
     broadcastState();
@@ -312,14 +589,7 @@ export default defineBackground(() => {
       ws = new WebSocket(serverUrl);
       downloadWs = ws;
       ws.onopen = () => {
-        ws?.send(
-          JSON.stringify({
-            type: 'downloadModel',
-            filename,
-            repo: msg.source.repo,
-            url: msg.source.url,
-          }),
-        );
+        ws?.send(JSON.stringify(payload));
       };
       ws.onmessage = (ev) => {
         try {
@@ -332,7 +602,7 @@ export default defineBackground(() => {
           };
           if (data.type === 'progress') {
             state.downloadProgress = data.progress ?? null;
-            state.downloadLabel = data.label ?? `Downloading ${filename}...`;
+            state.downloadLabel = data.label ?? `Downloading ${displayLabel}...`;
             state.downloadSpeedBps =
               typeof data.bytesPerSec === 'number' ? data.bytesPerSec : null;
             broadcastState();
@@ -358,12 +628,47 @@ export default defineBackground(() => {
     }
   }
 
+  function startModelDownload(
+    msg: Extract<PopupToBackgroundMessage, { type: 'DOWNLOAD_MODEL' }>,
+  ): void {
+    const filename = msg.source.filename?.trim();
+    if (!filename) {
+      state.error = 'Select a model before downloading.';
+      broadcastState();
+      return;
+    }
+    startServerDownload(
+      filename,
+      filename,
+      {
+        type: 'downloadModel',
+        filename,
+        repo: msg.source.repo,
+        url: msg.source.url,
+      },
+      msg.serverUrl,
+    );
+  }
+
+  function startTranslatorDownload(
+    msg: Extract<PopupToBackgroundMessage, { type: 'DOWNLOAD_TRANSLATOR' }>,
+  ): void {
+    startServerDownload(
+      'hy-mt3-1.8b.gguf',
+      'Hy-MT3-1.8B',
+      { type: 'downloadTranslator' },
+      msg.serverUrl,
+    );
+  }
+
   chrome.runtime.onMessage.addListener(
     (
       message: PopupToBackgroundMessage | OffscreenToBackgroundMessage,
-      _sender,
+      sender,
       sendResponse,
     ) => {
+      if (!sender.url?.startsWith(chrome.runtime.getURL('/'))) return false;
+
       if (message.type === 'GET_STATE') {
         (async () => {
           await settingsReady;
@@ -399,6 +704,12 @@ export default defineBackground(() => {
         return false;
       }
 
+      if (message.type === 'DOWNLOAD_TRANSLATOR') {
+        startTranslatorDownload(message);
+        sendResponse({ ...state });
+        return false;
+      }
+
       if (message.type === 'CANCEL_DOWNLOAD') {
         cancelActiveDownload?.();
         sendResponse({ ...state });
@@ -410,6 +721,191 @@ export default defineBackground(() => {
         return true;
       }
 
+      if (message.type === 'SET_PROVIDER') {
+        state.provider = sanitizeProvider(message.provider);
+        void chrome.storage.local.set({ provider: state.provider }).catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_GEMINI_API_KEY' || message.type === 'SET_SPEECH_API_KEY') {
+        const isGemini = message.type === 'SET_GEMINI_API_KEY';
+        const provider = isGemini ? 'google' : sanitizeProvider(message.provider);
+        if (provider === 'local' || (!isGemini && provider === 'google') || typeof message.apiKey !== 'string') {
+          sendResponse({ error: 'Invalid provider or API key.' });
+          return false;
+        }
+        const apiKey = message.apiKey.trim();
+        const saved = credentialWrites.then(async () => {
+          await trustedStorageReady;
+          if (isGemini) {
+            const googleModels = apiKey ? sanitizeGoogleModels(message.models ?? state.googleModels) : [];
+            const googleModelId = pickDefaultGoogleModel(
+              googleModels, message.googleModelId ?? state.googleModelId,
+            )?.id ?? '';
+            const settings = { geminiApiKey: apiKey, googleModels, googleModelId };
+            await chrome.storage.local.set(settings);
+            Object.assign(state, settings);
+          } else if (provider !== 'google') {
+            await chrome.storage.local.set({ [`${provider}ApiKey`]: apiKey });
+            state.speechApiKeys[provider] = apiKey;
+          }
+          broadcastState();
+        });
+        credentialWrites = saved.catch(() => {});
+        saved.then(
+          () => sendResponse({ ok: true }),
+          () => sendResponse({ error: 'Could not update the saved API key.' }),
+        );
+        return true;
+      }
+
+      if (message.type === 'SET_GOOGLE_MODELS') {
+        state.googleModels = sanitizeGoogleModels(message.models);
+        state.googleModelId =
+          pickDefaultGoogleModel(
+            state.googleModels,
+            message.googleModelId ?? state.googleModelId,
+          )?.id ?? '';
+        void chrome.storage.local
+          .set({
+            googleModels: state.googleModels,
+            googleModelId: state.googleModelId,
+          })
+          .catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_GOOGLE_MODEL') {
+        const chosen = pickDefaultGoogleModel(state.googleModels, message.googleModelId);
+        state.googleModelId = chosen?.id ?? message.googleModelId;
+        void chrome.storage.local.set({ googleModelId: state.googleModelId }).catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'REFRESH_ELEVENLABS_MODELS' || message.type === 'SET_ELEVENLABS_MODEL') {
+        const updateModels = async () => {
+          await settingsReady;
+          const fetched = message.type === 'REFRESH_ELEVENLABS_MODELS'
+            ? await fetchElevenLabsModelsViaServer(state.serverUrl)
+            : undefined;
+          const saved = elevenLabsWrites.then(async () => {
+            const models = fetched ?? state.elevenLabsModels;
+            const preferredId = message.type === 'SET_ELEVENLABS_MODEL'
+              ? message.modelId
+              : state.elevenLabsModelId;
+            const selected = models.find((model) => model.id === preferredId);
+            if (!selected && message.type === 'SET_ELEVENLABS_MODEL') {
+              throw new Error('That ElevenLabs model is no longer available.');
+            }
+            const settings = {
+              elevenLabsModels: models,
+              elevenLabsModelId: selected?.id ?? models[0]?.id ?? '',
+            };
+            await chrome.storage.local.set(settings);
+            Object.assign(state, settings);
+            broadcastState();
+          });
+          elevenLabsWrites = saved.catch(() => {});
+          await saved;
+        };
+        updateModels().then(
+          () => sendResponse({ ok: true }),
+          (err) => sendResponse({ error: err instanceof Error ? err.message : 'Could not update ElevenLabs models.' }),
+        );
+        return true;
+      }
+
+      if (message.type === 'SET_LANGUAGE') {
+        state.language = message.language || DEFAULT_LANGUAGE;
+        void chrome.storage.local.set({ language: state.language }).catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_TARGET_LANGUAGE') {
+        state.targetLanguage = sanitizeTargetLanguage(message.targetLanguage);
+        void chrome.storage.local.set({ targetLanguage: state.targetLanguage }).catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_GOOGLE_TARGET_LANGUAGE') {
+        state.googleTargetLanguage = sanitizeGoogleTargetLanguage(message.targetLanguage);
+        void chrome.storage.local
+          .set({ googleTargetLanguage: state.googleTargetLanguage })
+          .catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_TRANSLATOR_ENGINE') {
+        state.translatorEngine = sanitizeTranslatorEngine(message.translatorEngine);
+        void chrome.storage.local
+          .set({ translatorEngine: state.translatorEngine })
+          .catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_TRANSLATOR_TARGET_LANGUAGE') {
+        state.translatorTargetLanguage = sanitizeTranslatorTargetLanguage(message.targetLanguage);
+        void chrome.storage.local
+          .set({ translatorTargetLanguage: state.translatorTargetLanguage })
+          .catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_VAD_ENDPOINTING') {
+        state.enableVadEndpointing = Boolean(message.enabled);
+        void chrome.storage.local
+          .set({ enableVadEndpointing: state.enableVadEndpointing })
+          .catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_VAD_MODEL') {
+        state.vadModel = sanitizeVadModel(message.vadModel);
+        void chrome.storage.local.set({ vadModel: state.vadModel }).catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_ENDPOINT_MECHANISM') {
+        state.endpointMechanism = sanitizeEndpointMechanism(message.endpointMechanism);
+        void chrome.storage.local
+          .set({ endpointMechanism: state.endpointMechanism })
+          .catch(() => {});
+        broadcastState();
+        return false;
+      }
+
+      if (message.type === 'SET_DIARIZATION_MODEL') {
+        state.diarizationModel = sanitizeDiarizationModel(message.diarizationModel, false);
+        state.enableDiarization = state.diarizationModel !== 'disabled';
+        void chrome.storage.local
+          .set({
+            diarizationModel: state.diarizationModel,
+            enableDiarization: state.enableDiarization,
+          })
+          .catch(() => {});
+        if (state.status === 'listening' || state.status === 'loading') {
+          void chrome.runtime
+            .sendMessage({
+              type: 'OFFSCREEN_SET_DIARIZATION',
+              enabled: state.enableDiarization,
+              model: state.diarizationModel,
+            })
+            .catch(() => {});
+        }
+        broadcastState();
+        return false;
+      }
+
       if (message.type === 'SET_FURIGANA') {
         state.showFurigana = message.enabled;
         void chrome.storage.local.set({ showFurigana: message.enabled }).catch(() => {});
@@ -419,23 +915,6 @@ export default defineBackground(() => {
         );
         if (state.status === 'listening' && state.tabId !== null && subtitleLines.length > 0) {
           void sendSubtitleToTab(state.tabId, subtitleLines, true);
-        }
-        broadcastState();
-        return false;
-      }
-
-      if (message.type === 'SET_DIARIZATION') {
-        state.enableDiarization = message.enabled;
-        void chrome.storage.local
-          .set({ enableDiarization: state.enableDiarization })
-          .catch(() => {});
-        if (state.status === 'listening' || state.status === 'loading') {
-          void chrome.runtime
-            .sendMessage({
-              type: 'OFFSCREEN_SET_DIARIZATION',
-              enabled: state.enableDiarization,
-            })
-            .catch(() => {});
         }
         broadcastState();
         return false;
@@ -472,8 +951,10 @@ export default defineBackground(() => {
 
         state.customModels = customModels;
         state.hiddenModelIds = hiddenModelIds;
-        state.modelId = active.id;
-        state.quantId = pickVariantForModel(active, state.quantId).id;
+        if (active.id !== state.modelId) {
+          state.modelId = active.id;
+          state.quantId = active.defaultVariantId;
+        }
 
         void chrome.storage.local
           .set({

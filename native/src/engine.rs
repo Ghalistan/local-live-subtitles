@@ -3,6 +3,7 @@ use crate::diarizer::NemotronDiarizer;
 use crate::models::{
     DEFAULT_FILENAME, DEFAULT_REPO, ensure_diarizer_file, ensure_file_by_source, ensure_vad_file,
 };
+use crate::translator::{HyMt3Server, ensure_hy_mt3_model, ensure_llama_server_binary};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -21,6 +22,7 @@ pub struct AsrEngine {
     models: tokio::sync::Mutex<HashMap<String, Arc<LoadedWhisper>>>,
     vad: tokio::sync::Mutex<Option<Arc<Mutex<WhisperVadContext>>>>,
     diarizer: tokio::sync::Mutex<Option<Arc<NemotronDiarizer>>>,
+    translator: tokio::sync::Mutex<Option<Arc<HyMt3Server>>>,
 }
 
 impl AsrEngine {
@@ -29,7 +31,32 @@ impl AsrEngine {
             models: tokio::sync::Mutex::new(HashMap::new()),
             vad: tokio::sync::Mutex::new(None),
             diarizer: tokio::sync::Mutex::new(None),
+            translator: tokio::sync::Mutex::new(None),
         }
+    }
+
+    pub async fn get_or_start_hy_mt3<F>(
+        &self,
+        mut on_progress: F,
+    ) -> Result<Arc<HyMt3Server>, String>
+    where
+        F: FnMut(Option<u8>, String, Option<u64>) + Send,
+    {
+        let mut guard = self.translator.lock().await;
+        if let Some(existing) = guard.as_ref()
+            && existing.is_alive()
+        {
+            return Ok(Arc::clone(existing));
+        }
+
+        let exe = ensure_llama_server_binary(&mut on_progress).await?;
+        let model = ensure_hy_mt3_model(&mut on_progress).await?;
+        on_progress(None, "Loading Hy-MT3-1.8B onto GPU...".to_string(), None);
+
+        let server = HyMt3Server::start(&exe, &model).await?;
+        let arc = Arc::new(server);
+        *guard = Some(Arc::clone(&arc));
+        Ok(arc)
     }
 
     pub async fn get_or_load_vad<F>(&self, on_progress: F) -> Option<Arc<Mutex<WhisperVadContext>>>
@@ -149,6 +176,11 @@ impl AsrEngine {
     pub async fn unload_model(&self, filename: &str) {
         let mut guard = self.models.lock().await;
         guard.remove(filename);
+    }
+
+    pub async fn unload_hy_mt3(&self) {
+        let mut guard = self.translator.lock().await;
+        guard.take();
     }
 
     pub async fn loaded_filenames(&self) -> Vec<String> {

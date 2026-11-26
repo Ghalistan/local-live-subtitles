@@ -1,8 +1,10 @@
 use crate::state::{
-    DEFAULT_PORT, SharedState, TranscriptLine, extract_port, format_local_addr, parse_port_input,
+    DEFAULT_PORT, SharedState, StateSnapshot, TranscriptLine, extract_port, format_local_addr,
+    parse_port_input,
 };
 use eframe::egui;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 fn find_japanese_font_bytes() -> Option<Vec<u8>> {
     let candidates = [
@@ -118,17 +120,97 @@ fn render_furigana_line(
     });
 }
 
+fn format_line_for_copy(line: &TranscriptLine) -> String {
+    if line.speakers.is_empty() {
+        line.text.clone()
+    } else {
+        let tags = line
+            .speakers
+            .iter()
+            .map(|id| format!("S{id}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        format!("[{tags}] {}", line.text)
+    }
+}
+
+pub(crate) fn build_copy_text(snap: &StateSnapshot) -> String {
+    let mut lines: Vec<String> = snap.history.iter().map(format_line_for_copy).collect();
+    if let Some(interim) = &snap.interim {
+        let trimmed = interim.text.trim();
+        if !trimmed.is_empty() {
+            lines.push(format_line_for_copy(interim));
+        }
+    }
+    if !lines.is_empty() {
+        return lines.join("\n");
+    }
+    snap.activity.trim().to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn mirror_linux_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let owned = text.to_string();
+    let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    std::thread::spawn(move || {
+        let tools: &[(&str, &[&str])] = if is_wayland {
+            &[
+                ("wl-copy", &[]),
+                ("xclip", &["-selection", "clipboard"]),
+                ("xsel", &["--clipboard", "--input"]),
+            ]
+        } else {
+            &[
+                ("xclip", &["-selection", "clipboard"]),
+                ("xsel", &["--clipboard", "--input"]),
+                ("wl-copy", &[]),
+            ]
+        };
+
+        for (bin, args) in tools {
+            if let Ok(mut child) = Command::new(bin)
+                .args(*args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(owned.as_bytes());
+                }
+                let _ = child.wait();
+                break;
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mirror_linux_clipboard(_text: &str) {}
+
+fn copy_to_system_clipboard(ctx: &egui::Context, text: &str) {
+    ctx.copy_text(text.to_string());
+    mirror_linux_clipboard(text);
+}
+
 struct LiveSubtitlesApp<F> {
     state: SharedState,
     on_exit: F,
     show_settings: bool,
     port_input: String,
     local_port_error: Option<String>,
+    copied_until: Option<Instant>,
+    last_button_copied: Option<String>,
 }
 
 impl<F> LiveSubtitlesApp<F> {
     fn new(cc: &eframe::CreationContext<'_>, state: SharedState, on_exit: F) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        cc.egui_ctx
+            .style_mut_of(egui::Theme::Dark, |s| s.interaction.selectable_labels = true);
         install_japanese_font(&cc.egui_ctx);
         state.attach_egui_ctx(cc.egui_ctx.clone());
         let port_input = extract_port(&state.snapshot().server_addr).to_string();
@@ -138,6 +220,8 @@ impl<F> LiveSubtitlesApp<F> {
             show_settings: false,
             port_input,
             local_port_error: None,
+            copied_until: None,
+            last_button_copied: None,
         }
     }
 
@@ -208,28 +292,21 @@ impl<F: FnMut()> eframe::App for LiveSubtitlesApp<F> {
                         if ui.button("Clear").clicked() {
                             self.state.clear_history();
                         }
-                        if ui.button("Copy").clicked() {
-                            let all_text = snap
-                                .history
-                                .iter()
-                                .map(|l| {
-                                    if l.speakers.is_empty() {
-                                        l.text.clone()
-                                    } else {
-                                        let tags = l
-                                            .speakers
-                                            .iter()
-                                            .map(|id| format!("S{id}"))
-                                            .collect::<Vec<_>>()
-                                            .join("/");
-                                        format!("[{tags}] {}", l.text)
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if !all_text.is_empty() {
-                                ctx.copy_text(all_text);
-                            }
+                        let copy_text = build_copy_text(&snap);
+                        let showing_copied = self
+                            .copied_until
+                            .is_some_and(|until| Instant::now() < until);
+                        if showing_copied {
+                            ctx.request_repaint_after(Duration::from_millis(250));
+                        }
+                        let copy_label = if showing_copied { "Copied!" } else { "Copy" };
+                        if ui
+                            .add_enabled(!copy_text.is_empty(), egui::Button::new(copy_label))
+                            .clicked()
+                        {
+                            self.last_button_copied = Some(copy_text.clone());
+                            copy_to_system_clipboard(&ctx, &copy_text);
+                            self.copied_until = Some(Instant::now() + Duration::from_millis(1500));
                         }
                     }
                 });
@@ -325,10 +402,14 @@ impl<F: FnMut()> eframe::App for LiveSubtitlesApp<F> {
                 .inner_margin(10.0)
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.label(
-                        egui::RichText::new(&snap.activity)
-                            .small()
-                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&snap.activity)
+                                .small()
+                                .color(egui::Color32::from_rgb(148, 163, 184)),
+                        )
+                        .selectable(true)
+                        .wrap(),
                     );
                     ui.add_space(4.0);
                     if let Some(line) = snap.interim.as_ref().or_else(|| snap.history.last()) {
@@ -386,6 +467,22 @@ impl<F: FnMut()> eframe::App for LiveSubtitlesApp<F> {
                     }
                 });
         });
+
+        let manual_copies: Vec<String> = ctx.output(|o| {
+            o.commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    egui::OutputCommand::CopyText(txt) if !txt.is_empty() => Some(txt.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        let button_copy = self.last_button_copied.take();
+        for txt in manual_copies {
+            if button_copy.as_deref() != Some(txt.as_str()) {
+                mirror_linux_clipboard(&txt);
+            }
+        }
     }
 }
 
@@ -410,4 +507,27 @@ pub fn run_window(state: SharedState, on_exit: impl FnMut()) -> eframe::Result<(
         options,
         Box::new(move |cc| Ok(Box::new(LiveSubtitlesApp::new(cc, state, on_exit)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_copy_text_from_history_interim_or_activity() {
+        let state = SharedState::new("127.0.0.1:8765".to_string());
+        state.set_status("Error", None, "Translate retry: some error");
+        assert_eq!(build_copy_text(&state.snapshot()), "Translate retry: some error");
+
+        state.push_transcript("live interim".to_string(), Vec::new(), vec![2], false, 0);
+        assert_eq!(build_copy_text(&state.snapshot()), "[S2] live interim");
+
+        state.push_transcript("first line".to_string(), Vec::new(), vec![1, 2], true, 120);
+        state.push_transcript("second line".to_string(), Vec::new(), Vec::new(), true, 90);
+        state.push_transcript("next interim".to_string(), Vec::new(), Vec::new(), false, 0);
+        assert_eq!(
+            build_copy_text(&state.snapshot()),
+            "[S1/S2] first line\nsecond line\nnext interim"
+        );
+    }
 }

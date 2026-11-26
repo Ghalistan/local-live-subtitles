@@ -2099,6 +2099,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 name = "live-subtitles-native"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "eframe",
  "futures-util",
  "ksni",
@@ -2106,10 +2107,14 @@ dependencies = [
  "ort",
  "parakeet-rs",
  "reqwest",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
+ "webpki-roots",
  "whisper-rs",
 ]
 

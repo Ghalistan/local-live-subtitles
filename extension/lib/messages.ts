@@ -1,7 +1,70 @@
+import type { ElevenLabsModelInfo } from './elevenlabs';
+import type { GoogleModelInfo } from './gemini';
 import type { CustomModelDefinition, NativeModelSource, TargetLanguage } from './models';
 
 export type SessionStatus = 'idle' | 'loading' | 'listening' | 'error';
-export type DeviceKind = 'vulkan' | 'metal' | null;
+export const CLOUD_PROVIDERS = [
+  { id: 'google', label: 'Google Gemini' },
+  { id: 'soniox', label: 'Soniox' },
+  { id: 'elevenlabs', label: 'ElevenLabs' },
+] as const;
+export type CloudProvider = (typeof CLOUD_PROVIDERS)[number]['id'];
+export type SpeechProvider = Exclude<CloudProvider, 'google'>;
+export type ProviderKind = 'local' | CloudProvider;
+export type DeviceKind = 'vulkan' | 'metal' | CloudProvider | null;
+export type TranslatorEngine = 'disabled' | 'hy-mt3';
+export type VadModel = 'silero-v5' | 'rms';
+export type EndpointMechanism = 'silence-balanced' | 'silence-fast' | 'fixed-window';
+export type DiarizationModel = 'disabled' | 'nemotron-sortformer';
+
+export const DEFAULT_TRANSLATOR_ENGINE: TranslatorEngine = 'disabled';
+export const DEFAULT_VAD_MODEL: VadModel = 'silero-v5';
+export const DEFAULT_ENDPOINT_MECHANISM: EndpointMechanism = 'silence-balanced';
+export const DEFAULT_DIARIZATION_MODEL: DiarizationModel = 'disabled';
+
+export const VAD_MODELS: readonly { id: VadModel; label: string }[] = [
+  { id: 'silero-v5', label: 'Silero VAD v5 (Neural)' },
+  { id: 'rms', label: 'RMS Energy (Lightweight)' },
+];
+
+export const ENDPOINT_MECHANISMS: readonly { id: EndpointMechanism; label: string }[] = [
+  { id: 'silence-balanced', label: 'Silence Pause (Balanced)' },
+  { id: 'silence-fast', label: 'Silence Pause (Fast)' },
+  { id: 'fixed-window', label: 'Fixed Window (3s)' },
+];
+
+export const DIARIZATION_MODELS: readonly { id: DiarizationModel; label: string }[] = [
+  { id: 'disabled', label: 'Disabled' },
+  { id: 'nemotron-sortformer', label: 'Nemotron-3 Sortformer (Streaming)' },
+];
+
+export function sanitizeTranslatorEngine(raw: unknown): TranslatorEngine {
+  return raw === 'hy-mt3' ? 'hy-mt3' : 'disabled';
+}
+
+export function sanitizeVadModel(raw: unknown): VadModel {
+  return raw === 'rms' ? 'rms' : 'silero-v5';
+}
+
+export function sanitizeEndpointMechanism(raw: unknown): EndpointMechanism {
+  if (raw === 'silence-fast' || raw === 'fixed-window') {
+    return raw;
+  }
+  return 'silence-balanced';
+}
+
+export function sanitizeDiarizationModel(
+  raw: unknown,
+  legacyEnabled = false,
+): DiarizationModel {
+  if (raw === 'nemotron-sortformer') return 'nemotron-sortformer';
+  if (raw === 'disabled') return 'disabled';
+  return legacyEnabled ? 'nemotron-sortformer' : 'disabled';
+}
+
+export function sanitizeProvider(raw: unknown): ProviderKind {
+  return CLOUD_PROVIDERS.find(({ id }) => id === raw)?.id ?? 'local';
+}
 
 export interface FuriganaToken {
   text: string;
@@ -104,11 +167,25 @@ export function parsePortFromServerUrl(url: string): number {
 
 export interface ExtensionState {
   status: SessionStatus;
+  provider: ProviderKind;
   tabId: number | null;
   modelId: string;
   quantId: string;
   hiddenModelIds: string[];
   customModels: CustomModelDefinition[];
+  geminiApiKey: string;
+  speechApiKeys: Record<SpeechProvider, string>;
+  googleModelId: string;
+  googleModels: GoogleModelInfo[];
+  elevenLabsModelId: string;
+  elevenLabsModels: ElevenLabsModelInfo[];
+  googleTargetLanguage: string;
+  translatorEngine: TranslatorEngine;
+  translatorTargetLanguage: string;
+  enableVadEndpointing: boolean;
+  vadModel: VadModel;
+  endpointMechanism: EndpointMechanism;
+  diarizationModel: DiarizationModel;
   language: string;
   targetLanguage: TargetLanguage;
   showFurigana: boolean;
@@ -132,18 +209,52 @@ export type PopupToBackgroundMessage =
   | { type: 'GET_STATE' }
   | {
       type: 'START_CAPTURE';
+      provider?: ProviderKind;
       tabId: number;
       modelId: string;
       quantId: string;
-      source: NativeModelSource;
+      source?: NativeModelSource;
+      googleModel?: GoogleModelInfo;
+      elevenLabsModelId?: string;
       language: string;
       targetLanguage?: TargetLanguage;
+      googleTargetLanguage?: string;
+      translatorEngine?: TranslatorEngine;
+      translatorTargetLanguage?: string;
+      enableVadEndpointing?: boolean;
+      vadModel?: VadModel;
+      endpointMechanism?: EndpointMechanism;
+      diarizationModel?: DiarizationModel;
       enableDiarization?: boolean;
       serverUrl?: string;
     }
   | { type: 'STOP_CAPTURE' }
+  | { type: 'SET_PROVIDER'; provider: ProviderKind }
+  | {
+      type: 'SET_GEMINI_API_KEY';
+      apiKey: string;
+      models?: GoogleModelInfo[];
+      googleModelId?: string;
+    }
+  | { type: 'SET_SPEECH_API_KEY'; provider: SpeechProvider; apiKey: string }
+  | {
+      type: 'SET_GOOGLE_MODELS';
+      models: GoogleModelInfo[];
+      googleModelId?: string;
+    }
+  | { type: 'SET_GOOGLE_MODEL'; googleModelId: string }
+  | { type: 'REFRESH_ELEVENLABS_MODELS' }
+  | { type: 'SET_ELEVENLABS_MODEL'; modelId: string }
+  | { type: 'SET_LANGUAGE'; language: string }
+  | { type: 'SET_TARGET_LANGUAGE'; targetLanguage: TargetLanguage }
+  | { type: 'SET_GOOGLE_TARGET_LANGUAGE'; targetLanguage: string }
+  | { type: 'SET_TRANSLATOR_ENGINE'; translatorEngine: TranslatorEngine }
+  | { type: 'SET_TRANSLATOR_TARGET_LANGUAGE'; targetLanguage: string }
+  | { type: 'SET_VAD_ENDPOINTING'; enabled: boolean }
+  | { type: 'SET_VAD_MODEL'; vadModel: VadModel }
+  | { type: 'SET_ENDPOINT_MECHANISM'; endpointMechanism: EndpointMechanism }
+  | { type: 'SET_DIARIZATION_MODEL'; diarizationModel: DiarizationModel }
   | { type: 'SET_FURIGANA'; enabled: boolean }
-  | { type: 'SET_DIARIZATION'; enabled: boolean }
   | { type: 'SET_STYLE'; style: SubtitleStyle }
   | { type: 'SET_SERVER_URL'; serverUrl: string }
   | {
@@ -156,19 +267,60 @@ export type PopupToBackgroundMessage =
       source: NativeModelSource;
       serverUrl?: string;
     }
+  | {
+      type: 'DOWNLOAD_TRANSLATOR';
+      serverUrl?: string;
+    }
   | { type: 'CANCEL_DOWNLOAD' };
 
 export type BackgroundToOffscreenMessage =
   | {
       type: 'OFFSCREEN_START';
+      provider: 'local';
       streamId: string;
       source: NativeModelSource;
       language: string;
       translate: boolean;
+      translatorEngine: TranslatorEngine;
+      translatorTargetLanguage: string;
+      enableVadEndpointing: boolean;
+      vadModel: VadModel;
+      endpointMechanism: EndpointMechanism;
+      diarizationModel: DiarizationModel;
       enableDiarization: boolean;
       serverUrl: string;
     }
-  | { type: 'OFFSCREEN_SET_DIARIZATION'; enabled: boolean }
+  | {
+      type: 'OFFSCREEN_START';
+      provider: 'google';
+      streamId: string;
+      apiKey: string;
+      model: GoogleModelInfo;
+      language: string;
+      targetLanguage: string;
+      translatorEngine: TranslatorEngine;
+      translatorTargetLanguage: string;
+      enableVadEndpointing: boolean;
+      vadModel: VadModel;
+      endpointMechanism: EndpointMechanism;
+      diarizationModel: DiarizationModel;
+      enableDiarization: boolean;
+      serverUrl: string;
+    }
+  | {
+      type: 'OFFSCREEN_START';
+      provider: SpeechProvider;
+      streamId: string;
+      apiKey: string;
+      elevenLabsModelId?: string;
+      language: string;
+      translatorEngine: TranslatorEngine;
+      translatorTargetLanguage: string;
+      diarizationModel: DiarizationModel;
+      enableDiarization: boolean;
+      serverUrl: string;
+    }
+  | { type: 'OFFSCREEN_SET_DIARIZATION'; enabled: boolean; model?: DiarizationModel }
   | { type: 'OFFSCREEN_STOP' };
 
 export const MAX_OVERLAY_LINES = 3;
@@ -194,6 +346,9 @@ export function pushSubtitleLine(
     (line) => !line.isFinal || incoming.updatedAt - line.updatedAt <= expireMs,
   );
   const last = active[active.length - 1];
+  if (!incoming.text.trim()) {
+    return { lines: last && !last.isFinal ? active.slice(0, -1) : active, nextId };
+  }
   let updated: SubtitleLine[];
   let outNextId = nextId;
 

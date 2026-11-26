@@ -8,8 +8,13 @@ import {
   parsePortFromServerUrl,
   portToServerUrl,
   pushSubtitleLine,
+  sanitizeDiarizationModel,
+  sanitizeEndpointMechanism,
   sanitizePort,
+  sanitizeProvider,
   sanitizeSubtitleStyle,
+  sanitizeTranslatorEngine,
+  sanitizeVadModel,
 } from './messages';
 
 describe('subtitle style helpers', () => {
@@ -111,5 +116,42 @@ describe('subtitle style helpers', () => {
       fourth.nextId,
     );
     expect(afterPause.lines.map((l) => l.text)).toEqual(['久しぶり']);
+  });
+
+  test('sanitizes provider kind and translator engine safely', () => {
+    expect(sanitizeProvider('google')).toBe('google');
+    expect(sanitizeProvider('soniox')).toBe('soniox');
+    expect(sanitizeProvider('elevenlabs')).toBe('elevenlabs');
+    expect(sanitizeProvider('local')).toBe('local');
+    expect(sanitizeProvider('unknown')).toBe('local');
+    expect(sanitizeProvider(undefined)).toBe('local');
+
+    expect(sanitizeTranslatorEngine('hy-mt3')).toBe('hy-mt3');
+    expect(sanitizeTranslatorEngine('disabled')).toBe('disabled');
+    expect(sanitizeTranslatorEngine('gemini')).toBe('disabled');
+    expect(sanitizeTranslatorEngine(undefined)).toBe('disabled');
+
+    expect(sanitizeVadModel('rms')).toBe('rms');
+    expect(sanitizeVadModel('silero-v5')).toBe('silero-v5');
+    expect(sanitizeVadModel('bad')).toBe('silero-v5');
+
+    expect(sanitizeEndpointMechanism('silence-fast')).toBe('silence-fast');
+    expect(sanitizeEndpointMechanism('fixed-window')).toBe('fixed-window');
+    expect(sanitizeEndpointMechanism('other')).toBe('silence-balanced');
+
+    expect(sanitizeDiarizationModel(undefined, true)).toBe('nemotron-sortformer');
+    expect(sanitizeDiarizationModel(undefined, false)).toBe('disabled');
+    expect(sanitizeDiarizationModel('disabled', true)).toBe('disabled');
+    expect(sanitizeDiarizationModel('nemotron-sortformer', false)).toBe('nemotron-sortformer');
+  });
+
+  test('drops a retracted interim while retaining finalized subtitle lines', () => {
+    const finalized = { id: 1, text: 'Hello', isFinal: true, updatedAt: 1000 };
+    const interim = { id: 2, text: 'Wo', isFinal: false, updatedAt: 1250 };
+    expect(pushSubtitleLine(
+      [finalized, interim],
+      { text: '', isFinal: false, updatedAt: 1500 },
+      3,
+    )).toEqual({ lines: [finalized], nextId: 3 });
   });
 });

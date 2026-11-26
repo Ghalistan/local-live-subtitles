@@ -5,7 +5,6 @@ import type {
   FuriganaToken,
   OffscreenToBackgroundMessage,
 } from '../../lib/messages';
-import type { NativeModelSource } from '../../lib/models';
 
 interface ServerInbound {
   type: 'progress' | 'ready' | 'activity' | 'transcript' | 'error';
@@ -20,6 +19,8 @@ interface ServerInbound {
   isFinal?: boolean;
   error?: string;
 }
+
+type OffscreenStartMessage = Extract<BackgroundToOffscreenMessage, { type: 'OFFSCREEN_START' }>;
 
 let mediaStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
@@ -105,20 +106,52 @@ async function stopCapture(): Promise<void> {
   }
 }
 
-function connectNativeServer(
-  serverUrl: string,
-  source: NativeModelSource,
-  language: string,
-  translate: boolean,
-  enableDiarization: boolean,
-): Promise<void> {
+function buildStartPayload(msg: OffscreenStartMessage): Record<string, unknown> {
+  const common = {
+    type: 'start',
+    provider: msg.provider,
+    language: msg.language,
+    translatorEngine: msg.translatorEngine,
+    translatorTargetLanguage: msg.translatorTargetLanguage,
+    diarizationModel: msg.diarizationModel,
+    diarization: msg.enableDiarization,
+  };
+  if (msg.provider === 'google') {
+    return {
+      ...common,
+      apiKey: msg.apiKey,
+      googleModel: msg.model,
+      googleTargetLanguage: msg.targetLanguage,
+      enableVadEndpointing: msg.enableVadEndpointing,
+      vadModel: msg.vadModel,
+      endpointMechanism: msg.endpointMechanism,
+    };
+  }
+  if (msg.provider !== 'local') {
+    return { ...common, apiKey: msg.apiKey, elevenLabsModelId: msg.elevenLabsModelId };
+  }
+
+  return {
+    ...common,
+    filename: msg.source.filename,
+    repo: msg.source.repo,
+    url: msg.source.url,
+    japaneseOnly: msg.source.japaneseOnly,
+    translate: msg.translate,
+    enableVadEndpointing: msg.enableVadEndpointing,
+    vadModel: msg.vadModel,
+    endpointMechanism: msg.endpointMechanism,
+  };
+}
+
+function connectNativeServer(msg: OffscreenStartMessage): Promise<void> {
   closeNativeSocket();
   nativeStopping = false;
   nativeReady = false;
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    const ws = new WebSocket(serverUrl);
+    const ws = new WebSocket(msg.serverUrl);
     nativeWs = ws;
 
     const fail = (message: string) => {
@@ -136,44 +169,33 @@ function connectNativeServer(
     };
 
     ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'start',
-          filename: source.filename,
-          repo: source.repo,
-          url: source.url,
-          language,
-          japaneseOnly: source.japaneseOnly,
-          translate,
-          diarization: enableDiarization,
-        }),
-      );
+      ws.send(JSON.stringify(buildStartPayload(msg)));
     };
 
     ws.onmessage = (event) => {
       if (typeof event.data !== 'string') return;
-      let msg: ServerInbound;
+      let inbound: ServerInbound;
       try {
-        msg = JSON.parse(event.data) as ServerInbound;
+        inbound = JSON.parse(event.data) as ServerInbound;
       } catch {
         return;
       }
 
-      if (msg.type === 'progress') {
+      if (inbound.type === 'progress') {
         notifyBackground({
           type: 'OFFSCREEN_STATUS',
           status: 'loading',
-          progress: msg.progress ?? null,
-          progressLabel: msg.label ?? 'Preparing model...',
-          speedBps: msg.bytesPerSec ?? null,
+          progress: inbound.progress ?? null,
+          progressLabel: inbound.label ?? 'Preparing model...',
+          speedBps: inbound.bytesPerSec ?? null,
         });
-      } else if (msg.type === 'ready') {
+      } else if (inbound.type === 'ready') {
         nativeReady = true;
         lastActivity = isCapturing ? 'Waiting for speech...' : '';
         notifyBackground({
           type: 'OFFSCREEN_STATUS',
           status: isCapturing ? 'listening' : 'idle',
-          device: msg.device ?? 'vulkan',
+          device: inbound.device ?? (msg.provider === 'local' ? 'vulkan' : msg.provider),
           activity: lastActivity,
           progress: isCapturing ? 100 : null,
           progressLabel: '',
@@ -184,45 +206,38 @@ function connectNativeServer(
           settled = true;
           resolve();
         }
-      } else if (msg.type === 'activity' && msg.activity) {
-        setActivity(msg.activity);
-      } else if (msg.type === 'transcript' && msg.text) {
+      } else if (inbound.type === 'activity' && inbound.activity) {
+        setActivity(inbound.activity);
+      } else if (inbound.type === 'transcript' && typeof inbound.text === 'string') {
         notifyBackground({
           type: 'OFFSCREEN_TRANSCRIPT',
-          text: msg.text,
-          tokens: msg.tokens,
-          speakers: msg.speakers,
-          isFinal: Boolean(msg.isFinal),
+          text: inbound.text,
+          tokens: inbound.tokens,
+          speakers: inbound.speakers,
+          isFinal: Boolean(inbound.isFinal),
         });
-      } else if (msg.type === 'error') {
-        fail(msg.error || 'Native ASR server error');
+      } else if (inbound.type === 'error') {
+        fail(inbound.error || 'Native ASR server error');
       }
     };
 
     ws.onerror = () => {
       if (!nativeStopping) {
         fail(
-          `Could not connect to native server at ${serverUrl}. Run: cd native && cargo run --release`,
+          `Could not connect to native server at ${msg.serverUrl}. Run: cd native && cargo run --release`,
         );
       }
     };
 
     ws.onclose = () => {
       if (!nativeStopping) {
-        fail(`Native server connection closed (${serverUrl}).`);
+        fail(`Native server connection closed (${msg.serverUrl}).`);
       }
     };
   });
 }
 
-async function startCapture(
-  streamId: string,
-  source: NativeModelSource,
-  language: string,
-  translate: boolean,
-  enableDiarization: boolean,
-  serverUrl: string,
-): Promise<void> {
+async function startCapture(msg: OffscreenStartMessage): Promise<void> {
   await stopCapture();
   isCapturing = true;
 
@@ -230,7 +245,7 @@ async function startCapture(
     audio: {
       mandatory: {
         chromeMediaSource: 'tab',
-        chromeMediaSourceId: streamId,
+        chromeMediaSourceId: msg.streamId,
       },
     },
     video: false,
@@ -274,19 +289,12 @@ async function startCapture(
     nativeWs.send(pcm as BufferSource);
   };
 
-  await connectNativeServer(serverUrl, source, language, translate, enableDiarization);
+  await connectNativeServer(msg);
 }
 
 chrome.runtime.onMessage.addListener((message: BackgroundToOffscreenMessage) => {
   if (message.type === 'OFFSCREEN_START') {
-    startCapture(
-      message.streamId,
-      message.source,
-      message.language,
-      message.translate,
-      message.enableDiarization,
-      message.serverUrl,
-    ).catch((err) => {
+    startCapture(message).catch((err) => {
       isCapturing = false;
       notifyBackground({
         type: 'OFFSCREEN_STATUS',
@@ -300,6 +308,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundToOffscreenMessage) => 
         JSON.stringify({
           type: 'setDiarization',
           enabled: message.enabled,
+          model: message.model,
         }),
       );
     }

@@ -1,14 +1,15 @@
 # Local Live Subtitles
 
-Real-time local speech transcription and translation subtitles captured directly from browser tab audio. All audio processing and AI inference run locally on your machine using a native Rust GPU server (`whisper.cpp` on **Vulkan** for Linux/Windows, **Metal** for macOS) paired with a lightweight Chrome extension overlay.
+Real-time speech transcription and translation subtitles captured directly from browser tab audio. The Chrome extension works with a native Rust server for local GPU inference or optional cloud transcription.
 
 > **Browser Compatibility:** Currently **mainly tested on Google Chrome**. Other Chromium-based browsers that support Manifest V3 `tabCapture` and `offscreen` documents may work, though they are not actively tested.
 
 ## Features
 
 - **100% Local GPU Inference:** Captures active tab audio at 16 kHz and transcribes locally on Vulkan (Linux/Windows) or Metal (macOS).
-- **Flexible Model Catalog & Quantization Slider:** Pick a Whisper or Kotoba-Whisper model family and slide between **Fastest** (`Q4_K` / `Q5_0` / `Q5_1`) and **Best** (`FP16`), or customize the list and add local/Hugging Face `.bin` models in **Settings**.
-- **Direct Speech-to-English Translation (S2TT):** Models with full decoders (e.g., Whisper Large v3, Medium, Small, Base) unlock a **Target Language → English (Direct S2TT)** option, detected ahead of time via preset metadata and GGML headers.
+- **Local model selection.** Choose Whisper Large v3 (default) or the Japanese-only Kotoba Whisper v2.2. The extension fetches each model’s available GGML quantizations and file sizes from Hugging Face and caches the list locally. Installed variants stay selectable offline. Add other local or Hugging Face `.bin` models in **Settings**.
+- **Cloud transcription.** Use your own API key for Google Gemini, Soniox, or ElevenLabs. The native server streams captured tab audio to the selected provider.
+- **Direct speech-to-English translation (S2TT).** Whisper Large v3 and compatible custom models offer **Target Language → English (Direct S2TT)**.
 - **Japanese Furigana:** Automatic kanji reading annotations powered by embedded `lindera` (IPADIC).
 - **Streaming Speaker Diarization:** Optional ONNX speaker labeling (`Nemotron-3`) with stacked multi-speaker subtitle lines (up to 3 lines) when multiple people speak.
 - **Customizable Overlay & Persistence:** Adjust font size, colors, and background opacity on the **Display** tab; model downloads run in the background extension service worker with `MB/s` speed, live progress, and cancel support.
@@ -47,8 +48,10 @@ Download the Chrome extension zip and the desktop server archive for your OS fro
 ### 3. Capture Live Subtitles
 
 1. Open a tab with audio (e.g., YouTube or Twitch) and click the **Local Live Subtitles** extension icon.
-2. Confirm the server status pill says **Online**, select a model and quantization level, and click **Download**.
+2. Confirm the native server is online and choose a **Transcription Provider**. For **Local Whisper**, select a model and quantization level, then click **Download**. For a cloud provider, open **Settings → Cloud Provider API Keys**, select the provider, and save its API key. Return to **Model** to choose the provider for capture.
 3. Choose the **Spoken Language** (and **Target Language** if supported), then click **Start Subtitles on Active Tab**.
+
+Soniox and ElevenLabs use realtime speech-to-text. For ElevenLabs, choose a real-time model in **Model → ElevenLabs Model**. Use **Refresh** to update the list from ElevenLabs. To translate either provider’s subtitles, select **Hy-MT3** under **Translation** and download the local translator.
 
 ---
 

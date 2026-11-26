@@ -7,13 +7,16 @@ export interface ModelQuantOption {
   sizeLabel: string;
 }
 
+export type DiscoveredModelVariant = ModelQuantOption & { bytes: number };
+
 export interface ModelEntry {
   id: string;
   label: string;
   description: string;
   repo?: string;
+  filenameStem?: string;
   variants: readonly ModelQuantOption[];
-  defaultVariantId?: string;
+  defaultVariantId: string;
   japaneseOnly?: boolean;
   supportsDirectS2tt?: boolean;
   isCustom?: boolean;
@@ -74,88 +77,89 @@ export function isValidCustomFilename(filename: string): boolean {
   );
 }
 
-// Variants within each model are ordered left = fastest/smallest -> right = best quality.
 export const BUILTIN_MODELS: readonly ModelEntry[] = [
   {
     id: 'whisper-large-v3',
     label: 'Whisper Large v3',
     description: 'Multilingual ASR & Direct S2TT to English (best all-round accuracy).',
     repo: 'ggerganov/whisper.cpp',
+    filenameStem: 'ggml-large-v3',
     defaultVariantId: 'q5_0',
     supportsDirectS2tt: true,
-    variants: [
-      { id: 'q5_0', label: 'Q5_0', filename: 'ggml-large-v3-q5_0.bin', sizeLabel: '~1.08 GB' },
-      { id: 'f16', label: 'FP16', filename: 'ggml-large-v3.bin', sizeLabel: '~3.1 GB' },
-    ],
+    variants: [],
   },
   {
     id: 'kotoba-v2.2',
     label: 'Kotoba Whisper v2.2',
     description: 'Japanese VTubers, anime & casual slang (Japanese-only).',
     repo: 'Pomni/kotoba-whisper-v2.2-ggml-allquants',
+    filenameStem: 'ggml-kotoba-v2.2',
     defaultVariantId: 'q8_0',
     japaneseOnly: true,
     supportsDirectS2tt: false,
-    variants: [
-      { id: 'q4_k', label: 'Q4_K', filename: 'ggml-kotoba-v2.2-q4_k.bin', sizeLabel: '~445 MB' },
-      { id: 'q5_0', label: 'Q5_0', filename: 'ggml-kotoba-v2.2-q5_0.bin', sizeLabel: '~540 MB' },
-      { id: 'q8_0', label: 'Q8_0', filename: 'ggml-kotoba-v2.2-q8_0.bin', sizeLabel: '~820 MB' },
-      { id: 'f16', label: 'FP16', filename: 'ggml-kotoba-v2.2-f16.bin', sizeLabel: '~1.5 GB' },
-    ],
-  },
-  {
-    id: 'whisper-large-v3-turbo',
-    label: 'Whisper Large v3 Turbo',
-    description: 'Fast multilingual transcription (EN, JA, ID, ZH, KO; no Direct S2TT).',
-    repo: 'ggerganov/whisper.cpp',
-    defaultVariantId: 'q8_0',
-    supportsDirectS2tt: false,
-    variants: [
-      { id: 'q5_0', label: 'Q5_0', filename: 'ggml-large-v3-turbo-q5_0.bin', sizeLabel: '~575 MB' },
-      { id: 'q8_0', label: 'Q8_0', filename: 'ggml-large-v3-turbo-q8_0.bin', sizeLabel: '~875 MB' },
-      { id: 'f16', label: 'FP16', filename: 'ggml-large-v3-turbo.bin', sizeLabel: '~1.6 GB' },
-    ],
-  },
-  {
-    id: 'whisper-medium',
-    label: 'Whisper Medium',
-    description: 'Mid-size multilingual ASR & lighter Direct S2TT to English.',
-    repo: 'ggerganov/whisper.cpp',
-    defaultVariantId: 'q8_0',
-    supportsDirectS2tt: true,
-    variants: [
-      { id: 'q5_0', label: 'Q5_0', filename: 'ggml-medium-q5_0.bin', sizeLabel: '~539 MB' },
-      { id: 'q8_0', label: 'Q8_0', filename: 'ggml-medium-q8_0.bin', sizeLabel: '~825 MB' },
-      { id: 'f16', label: 'FP16', filename: 'ggml-medium.bin', sizeLabel: '~1.5 GB' },
-    ],
-  },
-  {
-    id: 'whisper-small',
-    label: 'Whisper Small',
-    description: 'Fast transcription or light Direct S2TT on low-VRAM GPUs.',
-    repo: 'ggerganov/whisper.cpp',
-    defaultVariantId: 'q8_0',
-    supportsDirectS2tt: true,
-    variants: [
-      { id: 'q5_1', label: 'Q5_1', filename: 'ggml-small-q5_1.bin', sizeLabel: '~190 MB' },
-      { id: 'q8_0', label: 'Q8_0', filename: 'ggml-small-q8_0.bin', sizeLabel: '~265 MB' },
-      { id: 'f16', label: 'FP16', filename: 'ggml-small.bin', sizeLabel: '~488 MB' },
-    ],
-  },
-  {
-    id: 'whisper-base',
-    label: 'Whisper Base',
-    description: 'Ultra-fast smoke testing or minimal hardware (supports Direct S2TT).',
-    repo: 'ggerganov/whisper.cpp',
-    defaultVariantId: 'q8_0',
-    supportsDirectS2tt: true,
-    variants: [
-      { id: 'q5_1', label: 'Q5_1', filename: 'ggml-base-q5_1.bin', sizeLabel: '~60 MB' },
-      { id: 'q8_0', label: 'Q8_0', filename: 'ggml-base-q8_0.bin', sizeLabel: '~82 MB' },
-      { id: 'f16', label: 'FP16', filename: 'ggml-base.bin', sizeLabel: '~148 MB' },
-    ],
+    variants: [],
   },
 ];
+
+type ModelFile = { filename: string; bytes: number };
+
+export function parseModelVariants(
+  model: ModelEntry,
+  files: readonly ModelFile[],
+): DiscoveredModelVariant[] {
+  const stem = model.filenameStem;
+  if (!stem) return [];
+  const variants = new Map<string, DiscoveredModelVariant>();
+  for (const file of files) {
+    if (!file || typeof file.filename !== 'string') continue;
+    if (!Number.isSafeInteger(file.bytes) || file.bytes <= 0) continue;
+    const { filename, bytes } = file;
+    if (!filename.startsWith(stem) || !isValidCustomFilename(filename)) continue;
+    const suffix = filename.slice(stem.length, -4);
+    // whisper.cpp's unsuffixed GGML release is FP16.
+    const id = suffix === ''
+      ? 'f16'
+      : /^-(q\d+(?:_[a-z0-9]+)*|f16|f32)$/i.exec(suffix)?.[1]?.toLowerCase();
+    if (!id || variants.has(id)) continue;
+    const label = id.startsWith('f') ? 'FP' + id.slice(1) : id.toUpperCase();
+    variants.set(id, { id, label, filename, bytes, sizeLabel: formatBytes(bytes) });
+  }
+  return [...variants.values()].sort((a, b) => a.bytes - b.bytes || a.id.localeCompare(b.id));
+}
+
+const VARIANT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+export async function loadModelVariants(model: ModelEntry): Promise<DiscoveredModelVariant[]> {
+  if (!model.repo || !model.filenameStem) return [];
+  const key = `quantizationFiles:${model.repo}:${model.filenameStem}`;
+  const cache = await chrome.storage.local
+    .get<Record<string, { fetchedAt: number; files: ModelFile[] }>>(key)
+    .then((items) => items[key])
+    .catch(() => undefined);
+  const cached = Array.isArray(cache?.files) ? parseModelVariants(model, cache.files) : [];
+  const age = Date.now() - (cache?.fetchedAt ?? 0);
+  if (cached.length && age >= 0 && age < VARIANT_CACHE_TTL_MS) return cached;
+
+  try {
+    const response = await fetch(`https://huggingface.co/api/models/${model.repo}?blobs=true`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) throw new Error(`Hugging Face returned HTTP ${response.status}.`);
+    const { siblings } = await response.json();
+    if (!Array.isArray(siblings)) throw new Error('Invalid Hugging Face file listing.');
+    const files = siblings.map((entry) => ({ filename: entry?.rfilename, bytes: entry?.size }));
+    const variants = parseModelVariants(model, files);
+    if (!variants.length) throw new Error(`No compatible GGML files found for ${model.label}.`);
+    const matchedFiles = variants.map(({ filename, bytes }) => ({ filename, bytes }));
+    await chrome.storage.local.set({
+      [key]: { fetchedAt: Date.now(), files: matchedFiles },
+    }).catch(() => {});
+    return variants;
+  } catch (error) {
+    if (cached.length) return cached;
+    throw error;
+  }
+}
 
 export const DEFAULT_MODEL_ID = 'whisper-large-v3';
 export const DEFAULT_QUANT_ID = 'q5_0';
@@ -169,12 +173,6 @@ const LEGACY_PRESET_MAP: Record<string, { modelId: string; quantId: string }> = 
   'kotoba-v2.2-q8': { modelId: 'kotoba-v2.2', quantId: 'q8_0' },
   'kotoba-v2.2-q5': { modelId: 'kotoba-v2.2', quantId: 'q5_0' },
   'kotoba-v2.2-q4': { modelId: 'kotoba-v2.2', quantId: 'q4_k' },
-  'whisper-large-v3-turbo-f16': { modelId: 'whisper-large-v3-turbo', quantId: 'f16' },
-  'whisper-large-v3-turbo-q8': { modelId: 'whisper-large-v3-turbo', quantId: 'q8_0' },
-  'whisper-large-v3-turbo-q5': { modelId: 'whisper-large-v3-turbo', quantId: 'q5_0' },
-  'whisper-medium-q8': { modelId: 'whisper-medium', quantId: 'q8_0' },
-  'whisper-small-q8': { modelId: 'whisper-small', quantId: 'q8_0' },
-  'whisper-base-q8': { modelId: 'whisper-base', quantId: 'q8_0' },
 };
 
 export function customModelToEntry(custom: CustomModelDefinition): ModelEntry {
@@ -254,31 +252,28 @@ export function sanitizeHiddenModelIds(
   return Array.from(hiddenSet);
 }
 
-export function getAllModels(customModels: readonly CustomModelDefinition[] = []): ModelEntry[] {
-  return [...BUILTIN_MODELS, ...customModels.map(customModelToEntry)];
-}
-
 export function buildVisibleModels(
   hiddenModelIds: readonly string[] = [],
   customModels: readonly CustomModelDefinition[] = [],
+  builtins: readonly ModelEntry[] = BUILTIN_MODELS,
 ): ModelEntry[] {
   const hidden = new Set(hiddenModelIds);
-  const visibleBuiltins = BUILTIN_MODELS.filter((m) => !hidden.has(m.id));
+  const visibleBuiltins = builtins.filter((m) => !hidden.has(m.id));
   const combined = [...visibleBuiltins, ...customModels.map(customModelToEntry)];
-  return combined.length > 0 ? combined : [BUILTIN_MODELS[0]!];
+  return combined.length > 0 ? combined : [builtins[0] ?? BUILTIN_MODELS[0]!];
 }
 
 export function findModelEntry(
   modelId: string,
   customModels: readonly CustomModelDefinition[] = [],
 ): ModelEntry {
-  return (
-    getAllModels(customModels).find((m) => m.id === modelId) ??
-    BUILTIN_MODELS.find((m) => m.id === DEFAULT_MODEL_ID)!
-  );
+  return buildVisibleModels([], customModels).find((model) => model.id === modelId) ?? BUILTIN_MODELS[0]!;
 }
 
-export function pickVariantForModel(model: ModelEntry, preferredQuantId?: string): ModelQuantOption {
+export function pickVariantForModel(
+  model: ModelEntry,
+  preferredQuantId?: string,
+): ModelQuantOption | undefined {
   if (preferredQuantId) {
     const exact = model.variants.find((v) => v.id === preferredQuantId);
     if (exact) return exact;
@@ -287,20 +282,15 @@ export function pickVariantForModel(model: ModelEntry, preferredQuantId?: string
       if (q5Match) return q5Match;
     }
   }
-  if (model.defaultVariantId) {
-    const def = model.variants.find((v) => v.id === model.defaultVariantId);
-    if (def) return def;
-  }
-  return model.variants[0]!;
+  return model.variants.find((v) => v.id === model.defaultVariantId) ?? model.variants[0];
 }
 
 export function resolveModelSource(
-  modelId: string,
+  model: ModelEntry,
   quantId?: string,
-  customModels: readonly CustomModelDefinition[] = [],
-): NativeModelSource {
-  const model = findModelEntry(modelId, customModels);
+): NativeModelSource | undefined {
   const variant = pickVariantForModel(model, quantId);
+  if (!variant) return undefined;
   return {
     filename: variant.filename,
     repo: model.repo,
@@ -311,9 +301,10 @@ export function resolveModelSource(
 
 export function buildFilenameLabelMap(
   customModels: readonly CustomModelDefinition[] = [],
+  builtins: readonly ModelEntry[] = BUILTIN_MODELS,
 ): Map<string, string> {
   const map = new Map<string, string>();
-  for (const model of BUILTIN_MODELS) {
+  for (const model of builtins) {
     for (const variant of model.variants) {
       map.set(variant.filename, `${model.label} (${variant.label})`);
     }
@@ -334,7 +325,7 @@ export function migrateLegacyModelSelection(
   let customModels = [...existingCustomModels];
 
   const legacy = LEGACY_PRESET_MAP[savedModelId];
-  if (legacy) {
+  if (Object.hasOwn(LEGACY_PRESET_MAP, savedModelId) && legacy) {
     return {
       modelId: legacy.modelId,
       quantId: legacy.quantId,
@@ -359,12 +350,11 @@ export function migrateLegacyModelSelection(
     return { modelId: created.id, quantId: 'custom', customModels };
   }
 
-  const all = getAllModels(customModels);
-  const matched = all.find((m) => m.id === savedModelId);
+  const matched = buildVisibleModels([], customModels).find((m) => m.id === savedModelId);
   if (matched) {
     return {
       modelId: matched.id,
-      quantId: pickVariantForModel(matched, savedQuantId).id,
+      quantId: matched.isCustom ? 'custom' : savedQuantId || matched.defaultVariantId,
       customModels,
     };
   }
