@@ -61,9 +61,28 @@ Soniox and ElevenLabs use realtime speech-to-text. For ElevenLabs, choose a real
 
 - **Rust** (stable toolchain) & **CMake**
 - **Bun** (`>= 1.2`)
-- **Linux:** `pkg-config`, `libclang-dev`, `libvulkan-dev`, `glslc`, X11/Wayland/GTK3/DBus dev headers (see [release.yml](.github/workflows/release.yml) for the exact `apt` list)
 - **Windows:** LunarG Vulkan SDK (`VULKAN_SDK`), LLVM (`LIBCLANG_PATH`), and MSVC Build Tools
 - **macOS:** Xcode Command Line Tools (Metal enabled automatically)
+- **Linux:** a C/C++ toolchain, CMake, pkg-config, libclang, the Vulkan **headers + loader**, `glslc`, and X11/Wayland/GTK3/DBus/OpenSSL dev headers:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y build-essential cmake pkg-config libclang-dev libvulkan-dev glslc \
+  libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev \
+  libgtk-3-dev libssl-dev libdbus-1-dev
+
+# Arch / Manjaro / CachyOS
+sudo pacman -S --needed base-devel cmake pkgconf clang vulkan-headers vulkan-icd-loader shaderc \
+  libx11 libxcb libxkbcommon wayland gtk3 openssl dbus
+
+# Fedora
+sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config clang-devel vulkan-headers vulkan-loader-devel glslc \
+  libX11-devel libxcb-devel libxkbcommon-devel wayland-devel gtk3-devel openssl-devel dbus-devel
+```
+
+> Having a Vulkan *driver* installed is not enough — the build needs the Vulkan **headers**
+> (`vulkan-headers` on Arch/Fedora, `libvulkan-dev` on Debian/Ubuntu). Without them the
+> `whisper-rs-sys` build fails with `Could NOT find Vulkan (missing: Vulkan_INCLUDE_DIR)`.
 
 ### Commands
 
@@ -72,10 +91,13 @@ Soniox and ElevenLabs use realtime speech-to-text. For ElevenLabs, choose a real
 cargo run --release --manifest-path native/Cargo.toml
 
 # 2. Install, test, and build the Chrome extension
-bun --cwd extension install
+bun install --cwd extension
 bun --cwd extension test
 bun --cwd extension build   # outputs to extension/.output/chrome-mv3/
 ```
+
+> Note: `install` must come before `--cwd` — `bun --cwd extension install` looks for a
+> package.json *script* named `install` and fails with `Script not found "install"`.
 
 Load `extension/.output/chrome-mv3/` via `chrome://extensions` → **Load unpacked**.
 
